@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 from rubka import Robot, Message
 from deep_translator import GoogleTranslator
 
-TOKEN = "BICHIA0YKDHSICBQBKGZHBZJAESKOFBNRXUTCEJAIZVLLWCZZETVPFCCJLIMHLJG"
+TOKEN = os.getenv("BOT_TOKEN")
 
 HEADERS = {
     "User-Agent": (
