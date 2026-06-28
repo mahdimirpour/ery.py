@@ -1,1 +1,7 @@
-
+rubka>=1.0.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+deep-translator>=1.11.0
+Pillow>=10.0.0
+pytesseract>=0.3.10
+lxml>=4.9.0
