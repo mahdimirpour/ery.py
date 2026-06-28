@@ -2,6 +2,5 @@ rubka
 requests
 beautifulsoup4
 deep-translator
-Pillow
-pytesseract
+urllib3
 lxml
