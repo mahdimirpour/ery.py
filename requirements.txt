@@ -1,7 +1,0 @@
-rubka
-requests
-beautifulsoup4
-deep-translator
-Pillow
-pytesseract
-lxml
