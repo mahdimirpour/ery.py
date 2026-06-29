@@ -9,7 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 
-TOKEN = "TOKEN_BIT"
+TOKEN = "BICHIA0YKDHSICBQBKGZHBZJAESKOFBNRXUTCEJAIZVLLWCZZETVPFCCJLIMHLJG"
 BASE_URL = "https://rubika.ir/api/v1"
 
 HEADERS = {
