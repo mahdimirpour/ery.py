@@ -1,141 +1,67 @@
-import os
 import re
-from io import BytesIO
-from urllib.parse import quote
-import concurrent.futures
-
+import time
+import asyncio
 import requests
-from bs4 import BeautifulSoup
+from urllib.parse import quote
 from rubka import Robot, Message
-from deep_translator import GoogleTranslator
 
+# ==================== توکن‌ها ====================
 TOKEN = "BICHIA0YKDHSICBQBKGZHBZJAESKOFBNRXUTCEJAIZVLLWCZZETVPFCCJLIMHLJG"
+GROQ_API_KEY = "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"
+
+# ==================== آیدی ادمین ====================
+ADMIN_ID = "b0HZHuj0o22032ecfc4d2e1b44ef6f49"
+
+# ==================== تنظیمات Groq ====================
+API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
+    "Authorization": f"Bearer {GROQ_API_KEY}",
+    "Content-Type": "application/json"
 }
 
-WIKI_API = "https://fa.wikipedia.org/w/api.php"
-WIKI_SUMMARY_API = "https://fa.wikipedia.org/api/rest_v1/page/summary/{}"
-DDG_HTML = "https://html.duckduckgo.com/html/"
-BING_SEARCH = "https://www.bing.com/search"
-
 bot = Robot(token=TOKEN, web_hook="")
+USER_STATS = {}
 
-# ذخیره وضعیت کاربران
-USER_STATE = {}
+# ==================== تابع Groq با مدیریت خطا ====================
 
-# -------------------- Safety / Content Filter --------------------
-
-BANNED_PATTERNS = [
-    r"\bsex\b", r"\bsexy\b", r"\bporn\b", r"\bxxx\b", r"\bfuck\b",
-    r"\bblowjob\b", r"\bbj\b", r"\bdick\b", r"\bpussy\b", r"\bhorny\b",
-    r"\bnude\b", r"\bnaked\b", r"\b18\+\b", r"\bسکس\b", r"\bسکسی\b",
-    r"\bپورن\b", r"\bلخت\b", r"\bبرهنه\b",
-]
-
-def contains_banned_content(text: str) -> bool:
-    text = text or ""
-    for pattern in BANNED_PATTERNS:
-        if re.search(pattern, text, re.IGNORECASE):
-            return True
-    return False
-
-def refusal_text():
-    return "در این مورد نمی‌توانم کمک کنم."
-
-# -------------------- Utils --------------------
-
-def clean_text(text: str) -> str:
-    text = re.sub(r"\[\d+\]", "", text or "")
-    text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"\n\s*\n", "\n\n", text)
-    return text.strip()
-
-def get_state(chat_id):
-    if chat_id not in USER_STATE:
-        USER_STATE[chat_id] = {
-            "mode": None,
-            "waiting": False,
-            "awaiting_lang": False,
-            "translate_target": None
+def ask_groq(question):
+    try:
+        data = {
+            "model": "llama-3.1-8b-instant",
+            "messages": [
+                {"role": "system", "content": "پاسخ مختصر و مفید به فارسی."},
+                {"role": "user", "content": question}
+            ],
+            "max_tokens": 300,
+            "temperature": 0.5
         }
-    return USER_STATE[chat_id]
 
-def set_state(chat_id, **kwargs):
-    if chat_id not in USER_STATE:
-        USER_STATE[chat_id] = {
-            "mode": None,
-            "waiting": False,
-            "awaiting_lang": False,
-            "translate_target": None
-        }
-    for key, value in kwargs.items():
-        if key in USER_STATE[chat_id]:
-            USER_STATE[chat_id][key] = value
+        response = requests.post(API_URL, json=data, headers=HEADERS, timeout=5)
 
-def normalize_cmd(text: str) -> str:
-    return (text or "").strip().lower()
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"][:500]
 
-def detect_language_code(text: str) -> str | None:
-    t = normalize_cmd(text)
-    mapping = {
-        "fa": "fa", "farsi": "fa", "persian": "fa", "فارسی": "fa",
-        "انگلیسی": "en", "english": "en", "en": "en",
-        "arabic": "ar", "عربی": "ar", "ar": "ar",
-        "turkish": "tr", "ترکی": "tr", "tr": "tr",
-        "german": "de", "آلمانی": "de", "de": "de",
-        "french": "fr", "فرانسوی": "fr", "fr": "fr",
-        "russian": "ru", "روسی": "ru", "ru": "ru",
-        "spanish": "es", "اسپانیایی": "es", "es": "es",
-        "italian": "it", "ایتالیایی": "it", "it": "it",
-    }
-    return mapping.get(t)
+        elif response.status_code == 502:
+            return "❌ خطای ۵۰۲ (Bad Gateway): سرور Groq در دسترس نیست. چند دقیقه بعد تلاش کن."
 
-# -------------------- Safe Send --------------------
+        elif response.status_code == 401:
+            return "❌ کلید API نامعتبر است. از پنل Groq کلید جدید بگیر."
 
-async def safe_reply(message: Message, text: str, **kwargs):
-    try:
-        return await message.reply(text, **kwargs)
+        elif response.status_code == 429:
+            return "⏳ محدودیت درخواست. ۵ ثانیه صبر کن."
+
+        else:
+            return f"❌ خطا: {response.status_code}"
+
+    except requests.exceptions.Timeout:
+        return "⏰ زمان پاسخ بیشتر از حد مجاز بود."
     except Exception as e:
-        print("reply error:", e)
-        return None
+        return f"❌ خطا: {str(e)[:100]}"
 
-async def safe_delete(msg):
-    try:
-        if msg:
-            await msg.delete()
-    except Exception as e:
-        print("delete error:", e)
+# ==================== جستجوی ویکی‌پدیا ====================
 
-# -------------------- Translation --------------------
-
-async def translate_text(text: str, target_lang: str) -> str:
-    """ترجمه با استفاده از Google Translate"""
-    try:
-        text = clean_text(text)
-        if not text:
-            return "متنی برای ترجمه ارسال نشده."
-        
-        if contains_banned_content(text):
-            return refusal_text()
-        
-        translator = GoogleTranslator(target=target_lang)
-        result = translator.translate(text)
-        return clean_text(result)
-        
-    except Exception as e:
-        print(f"Translation error: {e}")
-        return f"❌ خطا در ترجمه: {str(e)}"
-
-# -------------------- Search Functions --------------------
-
-def search_wikipedia(query: str):
-    """جستجو در ویکی‌پدیا - اولویت اول"""
+def search_wikipedia_fast(query):
     try:
         params = {
             "action": "query",
@@ -145,415 +71,194 @@ def search_wikipedia(query: str):
             "utf8": 1,
             "srlimit": 1,
         }
-        response = requests.get(WIKI_API, params=params, headers=HEADERS, timeout=8)
-        response.raise_for_status()
+        response = requests.get("https://fa.wikipedia.org/w/api.php", params=params, timeout=2)
         data = response.json()
-        
+
         results = data.get("query", {}).get("search", [])
         if not results:
             return None
-        
+
         title = results[0].get("title")
-        url = WIKI_SUMMARY_API.format(quote(title.replace(" ", "_")))
-        
-        response = requests.get(url, headers=HEADERS, timeout=8)
-        response.raise_for_status()
+        url = f"https://fa.wikipedia.org/api/rest_v1/page/summary/{quote(title.replace(' ', '_'))}"
+        response = requests.get(url, timeout=2)
         data = response.json()
-        
+
         extract = data.get("extract")
         if extract:
-            return clean_text(extract)
+            text = re.sub(r"\[\d+\]", "", extract)
+            text = re.sub(r"\s+", " ", text)
+            return text[:500] + "..." if len(text) > 500 else text
         return None
-        
-    except Exception as e:
-        print(f"Wikipedia error: {e}")
+    except:
         return None
 
-def search_duckduckgo(query: str):
-    """جستجو در DuckDuckGo - منبع دوم"""
+# ==================== پردازش پیام ====================
+
+async def process_message(bot, message):
     try:
-        params = {"q": query}
-        response = requests.get(DDG_HTML, params=params, headers=HEADERS, timeout=8)
-        response.raise_for_status()
-        html = response.text
-        
-        soup = BeautifulSoup(html, "html.parser")
-        items = []
-        
-        for result in soup.select(".result")[:2]:
-            title_el = result.select_one(".result__title a")
-            snippet_el = result.select_one(".result__snippet")
-            
-            if not title_el:
-                continue
-            
-            title = clean_text(title_el.get_text(" ", strip=True))
-            snippet = clean_text(snippet_el.get_text(" ", strip=True)) if snippet_el else ""
-            
-            items.append(f"{title}\n{snippet}")
-        
-        if items:
-            return "\n\n".join(items[:2])
-        return None
-        
+        chat_id = message.chat_id
+        text = message.text or ""
+
+        if not text or text.startswith("/"):
+            return
+
+        if chat_id not in USER_STATS:
+            USER_STATS[chat_id] = {"messages": 0, "last_active": time.time()}
+        USER_STATS[chat_id]["messages"] += 1
+        USER_STATS[chat_id]["last_active"] = time.time()
+
+        status_msg = await message.reply("⏳ **در حال اجرا...**")
+
+        response = await asyncio.get_event_loop().run_in_executor(None, ask_groq, text)
+
+        await status_msg.delete()
+        await message.reply(f"🤖 {response}")
+
     except Exception as e:
-        print(f"DuckDuckGo error: {e}")
-        return None
+        print(f"Process error: {e}")
+        try:
+            await status_msg.delete()
+            await message.reply("❌ خطا! دوباره تلاش کن.")
+        except:
+            pass
 
-def search_bing(query: str):
-    """جستجو در Bing - منبع سوم"""
-    try:
-        params = {"q": query, "count": 3}
-        response = requests.get(BING_SEARCH, params=params, headers=HEADERS, timeout=8)
-        response.raise_for_status()
-        html = response.text
-        
-        soup = BeautifulSoup(html, "html.parser")
-        items = []
-        
-        for result in soup.select("#b_results .b_algo")[:2]:
-            title_el = result.select_one("h2 a")
-            if not title_el:
-                continue
-            
-            title = clean_text(title_el.get_text(" ", strip=True))
-            snippet_el = result.select_one(".b_caption p")
-            snippet = clean_text(snippet_el.get_text(" ", strip=True)) if snippet_el else ""
-            
-            items.append(f"{title}\n{snippet}")
-        
-        if items:
-            return "\n\n".join(items[:2])
-        return None
-        
-    except Exception as e:
-        print(f"Bing error: {e}")
-        return None
-
-def search_all_sources(query: str, mode: str = "full") -> str:
-    """جستجو با اولویت ویکی‌پدیا و سپس منابع دیگر"""
-    query = clean_text(query)
-    if not query:
-        return "متنی برای پردازش ارسال نشده."
-    
-    if contains_banned_content(query):
-        return refusal_text()
-    
-    # مرحله 1: اول ویکی‌پدیا رو چک کن
-    wiki_result = search_wikipedia(query)
-    if wiki_result:
-        # اگر ویکی نتیجه داشت، همون رو برگردون
-        if mode == "short":
-            if len(wiki_result) > 500:
-                return wiki_result[:500] + "..."
-            return wiki_result
-        return wiki_result
-    
-    # مرحله 2: اگر ویکی نتیجه نداشت، برو سراغ منابع دیگه
-    ddg_result = search_duckduckgo(query)
-    bing_result = search_bing(query)
-    
-    # ترکیب نتایج از منابع دیگه
-    results = []
-    if ddg_result:
-        results.append(ddg_result)
-    if bing_result:
-        results.append(bing_result)
-    
-    if not results:
-        return "❌ نتیجه‌ای برای جستجوی شما پیدا نشد."
-    
-    # ادغام نتایج
-    final_result = "\n\n" + "─" * 40 + "\n\n".join(results)
-    
-    # اگر حالت خلاصه بود
-    if mode == "short":
-        if len(final_result) > 700:
-            return final_result[:700] + "..."
-    
-    return final_result
-
-# -------------------- Image Helpers --------------------
-
-def extract_string_reference(obj):
-    if obj is None:
-        return None
-    if isinstance(obj, str):
-        return obj.strip() or None
-    if isinstance(obj, list):
-        for item in obj:
-            ref = extract_string_reference(item)
-            if ref:
-                return ref
-        return None
-    if isinstance(obj, dict):
-        for key in ("url", "file_url", "download_url", "src", "path", "link"):
-            value = obj.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        for value in obj.values():
-            ref = extract_string_reference(value)
-            if ref:
-                return ref
-        return None
-    for attr in ("url", "file_url", "download_url", "src", "path", "link"):
-        if hasattr(obj, attr):
-            value = getattr(obj, attr)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    if hasattr(obj, "__dict__"):
-        return extract_string_reference(getattr(obj, "__dict__"))
-    return None
-
-def get_image_reference(message: Message):
-    for field in ("photo", "image", "file", "attachment", "media", "document", "content"):
-        if hasattr(message, field):
-            ref = extract_string_reference(getattr(message, field))
-            if ref:
-                return ref
-    for field in ("data", "payload", "__dict__"):
-        if hasattr(message, field):
-            ref = extract_string_reference(getattr(message, field))
-            if ref:
-                return ref
-    return None
-
-def download_bytes(ref: str):
-    if not ref:
-        return None
-    if os.path.exists(ref):
-        with open(ref, "rb") as f:
-            return f.read()
-    if ref.startswith("http://") or ref.startswith("https://"):
-        response = requests.get(ref, headers=HEADERS, timeout=15)
-        response.raise_for_status()
-        return response.content
-    return None
-
-def ocr_image_bytes(image_bytes: bytes) -> str:
-    try:
-        from PIL import Image
-        import pytesseract
-        img = Image.open(BytesIO(image_bytes))
-        text = pytesseract.image_to_string(img, lang="fas+eng")
-        return clean_text(text)
-    except Exception as e:
-        print("ocr error:", e)
-        return ""
-
-async def build_image_response(message: Message) -> str:
-    image_ref = get_image_reference(message)
-    if not image_ref:
-        return "❌ عکس پیدا نشد. دوباره عکس را ارسال کن."
-    
-    image_bytes = download_bytes(image_ref)
-    if not image_bytes:
-        return "❌ نتوانستم فایل عکس را دریافت کنم."
-    
-    extracted_text = ocr_image_bytes(image_bytes)
-    if not extracted_text:
-        return "❌ از داخل عکس متن قابل خواندن پیدا نشد."
-    
-    if contains_banned_content(extracted_text):
-        return refusal_text()
-    
-    state = get_state(getattr(message, "chat_id", None))
-    if state.get("mode") == "translate" and state.get("translate_target"):
-        translated = await translate_text(extracted_text, state["translate_target"])
-        return f"📝 **متن تشخیص داده شده:**\n{extracted_text}\n\n🌐 **ترجمه:**\n{translated}"
-    
-    answer = search_all_sources(extracted_text, mode="full")
-    return f"📝 **متن تشخیص داده شده:**\n{extracted_text}\n\n{answer}"
-
-# -------------------- Menus --------------------
-
-def settings_menu_text():
-    return (
-        "📋 **منوی تنظیمات:**\n\n"
-        "1️⃣ **سرچ کامل** - جستجو از همه منابع\n"
-        "2️⃣ **سرچ خلاصه** - نتیجه مختصر\n"
-        "3️⃣ **جستجوی تصویری** - OCR از عکس\n"
-        "4️⃣ **ترجمه متن** - ترجمه با گوگل\n"
-        "5️⃣ **لغو حالت** - بازگشت به حالت عادی\n\n"
-        "عدد گزینه یا اسم آن را بفرست."
-    )
-
-def translate_menu_text():
-    return (
-        "🌐 **ترجمه فعال شد.**\n\n"
-        "می‌خوای به چه زبانی ترجمه بشه؟\n"
-        "مثال: فارسی، انگلیسی، عربی، ترکی، آلمانی\n\n"
-        "📌 زبان‌های پشتیبانی شده:\n"
-        "فارسی، انگلیسی، عربی، ترکی، آلمانی، فرانسوی، روسی، اسپانیایی، ایتالیایی"
-    )
-
-# -------------------- Commands --------------------
+# ==================== هندلرها ====================
 
 @bot.on_message(commands=["start"])
-async def start(bot: Robot, message: Message):
-    chat_id = getattr(message, "chat_id", None)
-    if chat_id is not None:
-        set_state(chat_id, mode=None, waiting=False, awaiting_lang=False, translate_target=None)
-    
-    await safe_reply(
-        message,
-        "✅ **سلام! خوش اومدی.**\n\n"
-        "📌 **برای استفاده بهتر از ربات، عضو کانال سازنده شوید:**\n"
-        "https://rubika.ir/join/Meta_web\n\n"
-        "💡 **موضوعت را بفرست تا برات جستجو کنم.**\n"
-        "🔍 **اولویت جستجو:** ویکی‌پدیا → DuckDuckGo → Bing\n"
-        "🌐 **ترجمه:** Google Translate\n\n"
-        "📋 **برای تنظیمات:** /setting"
+async def start(bot, message: Message):
+    await message.reply(
+        "⚡ **ربات Groq**\n\n"
+        f"👤 {'✅ ادمین' if str(message.chat_id) == ADMIN_ID else 'کاربر عادی'}\n\n"
+        "💬 هر سوالی بپرس\n"
+        "📌 `/wiki موضوع` - ویکی‌پدیا\n"
+        "📌 `/admin` - پنل ادمین\n"
+        "📌 `/getid` - دریافت آیدی"
     )
 
-@bot.on_message(commands=["setting"])
-async def settings(bot: Robot, message: Message):
-    chat_id = getattr(message, "chat_id", None)
-    if chat_id is None:
-        return
-    
-    set_state(chat_id, mode="menu", waiting=True, awaiting_lang=False, translate_target=None)
-    await safe_reply(message, settings_menu_text())
+@bot.on_message(commands=["getid"])
+async def get_id(bot, message: Message):
+    await message.reply(f"🆔 **آیدی شما:** `{message.chat_id}`")
 
-# -------------------- Main Message Handler --------------------
+@bot.on_message(commands=["admin"])
+async def admin_panel(bot, message: Message):
+    if str(message.chat_id) != ADMIN_ID:
+        await message.reply("❌ فقط ادمین دسترسی دارد.")
+        return
+
+    stats = {
+        "users": len(USER_STATS),
+        "msgs": sum(s.get("messages", 0) for s in USER_STATS.values()),
+        "active": len([u for u, s in USER_STATS.items() if s.get("last_active", 0) > time.time() - 3600])
+    }
+
+    await message.reply(
+        f"🔐 **پنل ادمین**\n\n"
+        f"👥 کاربران: {stats['users']}\n"
+        f"💬 پیام‌ها: {stats['msgs']}\n"
+        f"🟢 آنلاین (۱h): {stats['active']}\n\n"
+        "📋 `/stats` - آمار\n"
+        "📋 `/users` - لیست کاربران\n"
+        "📋 `/broadcast پیام` - ارسال همگانی"
+    )
+
+@bot.on_message(commands=["stats"])
+async def stats(bot, message: Message):
+    if str(message.chat_id) != ADMIN_ID:
+        return
+
+    stats = {
+        "users": len(USER_STATS),
+        "msgs": sum(s.get("messages", 0) for s in USER_STATS.values()),
+        "active": len([u for u, s in USER_STATS.items() if s.get("last_active", 0) > time.time() - 3600])
+    }
+
+    recent = sorted(USER_STATS.items(), key=lambda x: x[1].get("last_active", 0), reverse=True)[:5]
+    recent_text = "\n".join([f"• {uid}: {s.get('messages', 0)} پیام" for uid, s in recent])
+
+    await message.reply(
+        f"📊 **آمار لحظه‌ای**\n\n"
+        f"👥 کل: {stats['users']}\n"
+        f"💬 کل پیام‌ها: {stats['msgs']}\n"
+        f"🟢 آنلاین (۱h): {stats['active']}\n\n"
+        f"📌 ۵ کاربر آخر:\n{recent_text or 'هیچ'}"
+    )
+
+@bot.on_message(commands=["users"])
+async def list_users(bot, message: Message):
+    if str(message.chat_id) != ADMIN_ID:
+        return
+
+    if not USER_STATS:
+        await message.reply("📭 هیچ کاربری وجود ندارد.")
+        return
+
+    user_list = "\n".join([f"• {uid}: {s.get('messages', 0)} پیام" for uid, s in USER_STATS.items()])
+
+    if len(user_list) > 4000:
+        for i in range(0, len(user_list), 4000):
+            await message.reply(f"👥 کاربران:\n\n{user_list[i:i+4000]}")
+    else:
+        await message.reply(f"👥 کاربران ({len(USER_STATS)} نفر):\n\n{user_list}")
+
+@bot.on_message(commands=["broadcast"])
+async def broadcast(bot, message: Message):
+    if str(message.chat_id) != ADMIN_ID:
+        return
+
+    text = message.text or ""
+    parts = text.split(" ", 1)
+    if len(parts) < 2:
+        await message.reply("❌ `/broadcast پیام`")
+        return
+
+    broadcast_text = parts[1].strip()
+    status_msg = await message.reply(f"⏳ ارسال به {len(USER_STATS)} کاربر...")
+
+    success = 0
+    for user_id in USER_STATS.keys():
+        try:
+            await bot.send_message(chat_id=user_id, text=f"📢 **پیام همگانی:**\n\n{broadcast_text}")
+            success += 1
+            await asyncio.sleep(0.05)
+        except:
+            pass
+
+    await status_msg.delete()
+    await message.reply(f"✅ ارسال شد! موفق: {success}")
+
+@bot.on_message(commands=["wiki"])
+async def wiki_search(bot, message: Message):
+    text = message.text or ""
+    parts = text.split(" ", 1)
+    if len(parts) < 2:
+        await message.reply("❌ `/wiki موضوع`")
+        return
+
+    query = parts[1].strip()
+    status_msg = await message.reply("⏳ جستجو...")
+
+    result = search_wikipedia_fast(query)
+    await status_msg.delete()
+
+    if result:
+        await message.reply(f"📚 {result}")
+    else:
+        await message.reply("❌ نتیجه‌ای پیدا نشد.")
+
+@bot.on_message(commands=["clear"])
+async def clear_history(bot, message: Message):
+    await message.reply("🗑️ تاریخچه شما پاک شد.")
+
+# ==================== هندلر اصلی ====================
 
 @bot.on_message()
-async def handle_messages(bot: Robot, message: Message):
-    try:
-        chat_id = getattr(message, "chat_id", None)
-        if chat_id is None:
-            return
+async def handle_messages(bot, message: Message):
+    asyncio.create_task(process_message(bot, message))
 
-        text = (getattr(message, "text", "") or "").strip()
-        caption = (getattr(message, "caption", "") or "").strip()
-        content = text or caption
-
-        if not content and not get_image_reference(message):
-            return
-
-        lowered = normalize_cmd(content)
-
-        if lowered == "/start" or lowered == "/setting":
-            return
-
-        state = get_state(chat_id)
-
-        # اگر حالت ترجمه و منتظر زبان است
-        if state.get("mode") == "translate" and state.get("awaiting_lang"):
-            lang_code = detect_language_code(content)
-            if not lang_code:
-                await safe_reply(
-                    message,
-                    "❌ **زبان را درست بفرست.**\n"
-                    "مثال: فارسی، انگلیسی، عربی، ترکی، آلمانی\n\n"
-                    "📌 زبان‌های پشتیبانی شده:\n"
-                    "فارسی، انگلیسی، عربی، ترکی، آلمانی، فرانسوی، روسی، اسپانیایی، ایتالیایی"
-                )
-                return
-
-            set_state(chat_id, mode="translate", waiting=True, awaiting_lang=False, translate_target=lang_code)
-            await safe_reply(
-                message,
-                f"✅ **زبان ترجمه روی {lang_code} تنظیم شد.**\n"
-                f"حالا متن را بفرست تا ترجمه کنم."
-            )
-            return
-
-        # اگر در منو است
-        if state.get("mode") == "menu" or (state.get("waiting") and state.get("mode") is None):
-            if lowered in ("1", "سرچ کامل", "کامل", "full"):
-                set_state(chat_id, mode="full", waiting=True, awaiting_lang=False, translate_target=None)
-                await safe_reply(message, "✅ **حالت سرچ کامل فعال شد.**\nموضوع را بفرست تا جستجو کنم.")
-                return
-
-            if lowered in ("2", "سرچ خلاصه", "خلاصه", "short"):
-                set_state(chat_id, mode="short", waiting=True, awaiting_lang=False, translate_target=None)
-                await safe_reply(message, "✅ **حالت سرچ خلاصه فعال شد.**\nموضوع را بفرست تا نتیجه مختصر بگیرم.")
-                return
-
-            if lowered in ("3", "جستجوی تصویری", "تصویری", "image"):
-                set_state(chat_id, mode="image", waiting=True, awaiting_lang=False, translate_target=None)
-                await safe_reply(message, "✅ **حالت جستجوی تصویری فعال شد.**\nعکس را بفرست تا متن داخلش رو بخونم.")
-                return
-
-            if lowered in ("4", "ترجمه متن", "ترجمه", "translate"):
-                set_state(chat_id, mode="translate", waiting=True, awaiting_lang=True, translate_target=None)
-                await safe_reply(message, translate_menu_text())
-                return
-
-            if lowered in ("5", "لغو", "cancel", "off", "خاموش"):
-                set_state(chat_id, mode=None, waiting=False, awaiting_lang=False, translate_target=None)
-                await safe_reply(message, "✅ **حالت فعلی لغو شد.**")
-                return
-
-            # اگر گزینه نامعتبر بود، منو را دوباره نشان بده
-            await safe_reply(message, settings_menu_text())
-            return
-
-        # فیلتر محتوای نامناسب
-        if contains_banned_content(content):
-            await safe_reply(message, refusal_text())
-            return
-
-        mode = state.get("mode")
-
-        # حالت ترجمه
-        if mode == "translate":
-            target_lang = state.get("translate_target")
-            if not target_lang:
-                set_state(chat_id, mode="translate", waiting=True, awaiting_lang=True, translate_target=None)
-                await safe_reply(message, translate_menu_text())
-                return
-
-            processing_msg = await safe_reply(message, "⏳ **درحال ترجمه...**")
-            try:
-                translated = await translate_text(content, target_lang)
-                await safe_reply(message, f"🌐 **ترجمه به {target_lang}:**\n\n{translated}")
-            finally:
-                await safe_delete(processing_msg)
-            return
-
-        # حالت سرچ کامل یا خلاصه
-        if mode in ("full", "short"):
-            processing_msg = await safe_reply(message, "⏳ **درحال جستجو...**")
-            try:
-                answer = search_all_sources(content, mode=mode)
-                await safe_reply(message, answer)
-            finally:
-                await safe_delete(processing_msg)
-            return
-
-        # حالت تصویری
-        if mode == "image":
-            processing_msg = await safe_reply(message, "⏳ **درحال پردازش عکس...**")
-            try:
-                image_ref = get_image_reference(message)
-                if image_ref:
-                    answer = await build_image_response(message)
-                    await safe_reply(message, answer)
-                elif content:
-                    answer = search_all_sources(content, mode="full")
-                    await safe_reply(message, answer)
-                else:
-                    await safe_reply(message, "❌ **عکس را بفرست.**")
-            finally:
-                await safe_delete(processing_msg)
-            return
-
-        # حالت پیش‌فرض - جستجو با اولویت ویکی
-        processing_msg = await safe_reply(message, "⏳ **درحال جستجو...**")
-        try:
-            answer = search_all_sources(content, mode="full")
-            await safe_reply(message, answer)
-        finally:
-            await safe_delete(processing_msg)
-
-    except Exception as e:
-        print(f"message handler error: {e}")
-        await safe_reply(message, f"❌ **خطایی رخ داد:** {str(e)}")
+# ==================== اجرا ====================
 
 if __name__ == "__main__":
-    print("ربات راه‌اندازی شد...")
-    print("اولویت جستجو: Wikipedia → DuckDuckGo → Bing")
-    print("ترجمه: Google Translate")
+    print("🚀 ربات با Groq آنلاین شد.")
+    print(f"👤 ادمین: {ADMIN_ID}")
+    print("⏳ منتظر پیام‌ها هستم...")
     bot.run()
